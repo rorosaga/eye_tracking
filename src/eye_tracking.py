@@ -2,6 +2,7 @@ import cv2
 import dlib
 import numpy as np
 from collections import deque
+import time  # For tracking timeout
 
 # Initialize face detector and facial landmark predictor
 detector = dlib.get_frontal_face_detector()
@@ -20,6 +21,36 @@ EYE_DISPLAY_HEIGHT = 75
 # History for smoothing - using shorter history with more weight on new positions
 left_pupil_history = deque(maxlen=3)
 right_pupil_history = deque(maxlen=3)
+
+# Time tracking for pupil detection
+left_pupil_last_updated = 0
+right_pupil_last_updated = 0
+RESET_TIMEOUT = 0.5  # Reset tracking if no update for 0.5 seconds
+
+# Stuck detection variables
+left_last_pos = None
+right_last_pos = None
+left_stuck_since = 0
+right_stuck_since = 0
+STUCK_TIMEOUT = 2.0  # Reset tracking if position hasn't changed for 2 seconds
+STUCK_THRESHOLD = 3  # How many pixels of movement to consider not stuck
+
+# Blink detection threshold - ratio of eye height to width
+EYE_AR_THRESHOLD = 0.2  # If the eye aspect ratio falls below this, eye is considered closed
+
+def eye_aspect_ratio(eye_points_array):
+    """Calculate the eye aspect ratio to detect blinks"""
+    # Compute the euclidean distances between the two sets of vertical eye landmarks
+    A = np.linalg.norm(eye_points_array[1] - eye_points_array[5])
+    B = np.linalg.norm(eye_points_array[2] - eye_points_array[4])
+    
+    # Compute the euclidean distance between the horizontal eye landmarks
+    C = np.linalg.norm(eye_points_array[0] - eye_points_array[3])
+    
+    # Compute the eye aspect ratio
+    ear = (A + B) / (2.0 * C)
+    
+    return ear
 
 def extract_eye(gray, eye_points):
     # Extract eye region from facial landmarks
@@ -69,7 +100,7 @@ def detect_pupil(eye_img):
     # IMPROVED METHOD: Combine multiple approaches for better accuracy
     
     # 1. Find dark regions (pupils are typically dark)
-    _, dark_regions = cv2.threshold(blur, 60, 255, cv2.THRESH_BINARY_INV)
+    _, dark_regions = cv2.threshold(blur, 50, 255, cv2.THRESH_BINARY_INV)  # Slightly more sensitive threshold
     kernel = np.ones((3, 3), np.uint8)
     dark_regions = cv2.morphologyEx(dark_regions, cv2.MORPH_CLOSE, kernel, iterations=1)
     
@@ -91,7 +122,7 @@ def detect_pupil(eye_img):
             area = cv2.contourArea(cnt)
             
             # Size filter
-            if area < (height * width * 0.5) and area > 30:
+            if area < (height * width * 0.5) and area > 20:  # Lower minimum area for smaller pupils
                 # Calculate center of contour
                 M = cv2.moments(cnt)
                 if M["m00"] != 0:
@@ -134,8 +165,8 @@ def detect_pupil(eye_img):
             dp=1.2,
             minDist=width//4,  # Only look for one circle in the eye
             param1=30,  # Lower for better detection
-            param2=20,  # Lower to detect more circles
-            minRadius=max(3, width//15),
+            param2=15,  # More sensitive to find more circles
+            minRadius=max(2, width//20),  # Smaller minimum radius
             maxRadius=max(10, width//5)
         )
         
@@ -176,44 +207,60 @@ def detect_pupil(eye_img):
     
     # Check if it's close enough to center
     dist_to_center = np.sqrt((min_loc[0] - eye_center_x)**2 + (min_loc[1] - eye_center_y)**2)
-    if dist_to_center < width * 0.4:  # Must be within 40% of eye width from center
+    if dist_to_center < width * 0.5:  # Expanded search radius to 50% of eye width
         return min_loc[0], min_loc[1]
     else:
-        # If all else fails, use the center of the eye
-        return eye_center_x, eye_center_y
+        # If all else fails, return None to force reset
+        return None, None
 
-def smooth_position(current_pos, history):
-    """Apply advanced smoothing to reduce jitter while maintaining responsiveness"""
+def smooth_position(current_pos, history, last_updated_time, last_pos, stuck_since):
+    """Apply advanced smoothing with timeout reset and stuck detection"""
+    current_time = time.time()
+    
+    # If position is None, we couldn't detect the pupil
     if current_pos is None:
-        return None
+        # If we haven't detected a pupil for a while, clear history to avoid sticking
+        if current_time - last_updated_time > RESET_TIMEOUT and len(history) > 0:
+            history.clear()
+            last_pos = None
+            stuck_since = 0
+        return None, last_updated_time, last_pos, stuck_since
+    
+    # We have a valid current position, update the last detected time
+    last_updated_time = current_time
     
     # Check if current position is drastically different from history
     if history and len(history) > 0:
         prev_pos = history[-1]
         dist = np.sqrt((current_pos[0] - prev_pos[0])**2 + (current_pos[1] - prev_pos[1])**2)
         
-        # If position jumped too far (likely error), use previous position
-        if dist > 20:  # Adjust threshold as needed
-            # Don't add this position to history as it's likely wrong
-            if len(history) > 0:
-                return history[-1]
+        # If position jumped too far and we've had stable tracking
+        if dist > 15 and len(history) >= 2:  # Reduced threshold
+            # If we've recently had valid tracking, be more cautious
+            time_diff = current_time - last_updated_time
+            if time_diff < 0.2:  # Recent valid tracking
+                # Don't add this position to history as it's likely wrong
+                return prev_pos, last_updated_time, last_pos, stuck_since
             else:
-                return current_pos
+                # It's been a while, accept the new position and reset history
+                history.clear()
+                history.append(current_pos)
+                return current_pos, last_updated_time, current_pos, current_time
     
     # Add current position to history
     history.append(current_pos)
     
     # If we don't have enough history, just return current position
     if len(history) < 2:
-        return current_pos
+        return current_pos, last_updated_time, current_pos, current_time
     
-    # Calculate weighted average
+    # Calculate weighted average with higher emphasis on recent positions
     total_x = 0
     total_y = 0
     total_weight = 0
     
     # Exponential weighting - much higher weight for recent positions
-    weights = [1, 2, 4]  # For a history of size 3
+    weights = [1, 3, 8]  # Increasing weight for current position
     weights = weights[-len(history):]  # Adjust to actual history length
     
     for i, (x, y) in enumerate(history):
@@ -224,8 +271,31 @@ def smooth_position(current_pos, history):
     
     smoothed_x = int(total_x / total_weight)
     smoothed_y = int(total_y / total_weight)
+    smoothed_pos = (smoothed_x, smoothed_y)
     
-    return (smoothed_x, smoothed_y)
+    # Check for stuck position (hasn't moved enough for 2 seconds)
+    if last_pos is not None:
+        dist = np.sqrt((smoothed_x - last_pos[0])**2 + (smoothed_y - last_pos[1])**2)
+        
+        if dist < STUCK_THRESHOLD:
+            # Position hasn't changed significantly
+            if stuck_since == 0:
+                # First time we noticed it's stuck
+                stuck_since = current_time
+            elif current_time - stuck_since > STUCK_TIMEOUT:
+                # Been stuck for too long, force reset
+                history.clear()
+                stuck_since = 0
+                last_pos = None
+                return None, last_updated_time, None, 0
+        else:
+            # Position has changed, reset stuck timer
+            stuck_since = 0
+    
+    # Update last position
+    last_pos = smoothed_pos
+    
+    return smoothed_pos, last_updated_time, last_pos, stuck_since
 
 while True:
     # Read frame from webcam
@@ -245,9 +315,25 @@ while True:
     # Detect faces
     faces = detector(gray)
     
+    # If no faces detected for a while, reset pupil tracking
+    if not faces:
+        current_time = time.time()
+        if current_time - left_pupil_last_updated > RESET_TIMEOUT:
+            left_pupil_history.clear()
+            left_last_pos = None
+            left_stuck_since = 0
+        if current_time - right_pupil_last_updated > RESET_TIMEOUT:
+            right_pupil_history.clear()
+            right_last_pos = None
+            right_stuck_since = 0
+    
     # Create blank eye views
     left_eye_display = np.zeros((EYE_DISPLAY_HEIGHT, EYE_DISPLAY_WIDTH, 3), dtype=np.uint8)
     right_eye_display = np.zeros((EYE_DISPLAY_HEIGHT, EYE_DISPLAY_WIDTH, 3), dtype=np.uint8)
+    
+    # Eye blink status - default to eyes closed
+    left_eye_open = False
+    right_eye_open = False
     
     for face in faces:
         # Get facial landmarks
@@ -260,6 +346,17 @@ while True:
         # Right eye indices (points 42-47) - but these are flipped in the camera
         # This is actually the LEFT eye in the image (right side of screen)
         left_eye_points = range(42, 48)
+        
+        # Check if eyes are open using aspect ratio
+        right_eye_landmarks = np.array([(landmarks.part(point).x, landmarks.part(point).y) for point in right_eye_points])
+        left_eye_landmarks = np.array([(landmarks.part(point).x, landmarks.part(point).y) for point in left_eye_points])
+        
+        right_ear = eye_aspect_ratio(right_eye_landmarks)
+        left_ear = eye_aspect_ratio(left_eye_landmarks)
+        
+        # Determine if eyes are open
+        right_eye_open = right_ear > EYE_AR_THRESHOLD
+        left_eye_open = left_ear > EYE_AR_THRESHOLD
         
         # Extract eye regions
         left_eye, left_eye_pos = extract_eye(gray, left_eye_points)
@@ -275,29 +372,42 @@ while True:
                 # Resize to constant size
                 left_eye_display = cv2.resize(left_eye_color, (EYE_DISPLAY_WIDTH, EYE_DISPLAY_HEIGHT))
                 
-                # Convert the zoomed eye to grayscale for pupil detection
-                left_eye_display_gray = cv2.cvtColor(left_eye_display, cv2.COLOR_BGR2GRAY)
-                
-                # Detect pupil on the zoomed eye image
-                left_pupil_x, left_pupil_y = detect_pupil(left_eye_display_gray)
-                
-                # Draw pupil on zoomed view if detected
-                if left_pupil_x is not None and left_pupil_y is not None:
-                    # Apply smoothing
-                    smooth_left_pupil = smooth_position((left_pupil_x, left_pupil_y), left_pupil_history)
+                # Only detect pupil if eye is open
+                if left_eye_open:
+                    # Convert the zoomed eye to grayscale for pupil detection
+                    left_eye_display_gray = cv2.cvtColor(left_eye_display, cv2.COLOR_BGR2GRAY)
                     
-                    if smooth_left_pupil:
-                        # Draw on zoomed view
-                        cv2.circle(left_eye_display, smooth_left_pupil, 5, (0, 255, 0), -1, cv2.LINE_AA)
+                    # Detect pupil on the zoomed eye image
+                    left_pupil_x, left_pupil_y = detect_pupil(left_eye_display_gray)
+                    
+                    # Draw pupil on zoomed view if detected
+                    if left_pupil_x is not None and left_pupil_y is not None:
+                        # Apply smoothing with timeout tracking and stuck detection
+                        smooth_left_pupil, left_pupil_last_updated, left_last_pos, left_stuck_since = smooth_position(
+                            (left_pupil_x, left_pupil_y), 
+                            left_pupil_history,
+                            left_pupil_last_updated,
+                            left_last_pos,
+                            left_stuck_since
+                        )
                         
-                        # Convert back to original frame coordinates for main display
-                        original_x = int(smooth_left_pupil[0] * left_eye.shape[1] / EYE_DISPLAY_WIDTH)
-                        original_y = int(smooth_left_pupil[1] * left_eye.shape[0] / EYE_DISPLAY_HEIGHT)
-                        frame_x = left_eye_pos[0] + original_x
-                        frame_y = left_eye_pos[1] + original_y
-                        
-                        # Draw on main frame
-                        cv2.circle(display_frame, (frame_x, frame_y), 4, (0, 255, 0), -1, cv2.LINE_AA)
+                        if smooth_left_pupil:
+                            # Draw on zoomed view
+                            cv2.circle(left_eye_display, smooth_left_pupil, 5, (0, 255, 0), -1, cv2.LINE_AA)
+                            
+                            # Convert back to original frame coordinates for main display
+                            original_x = int(smooth_left_pupil[0] * left_eye.shape[1] / EYE_DISPLAY_WIDTH)
+                            original_y = int(smooth_left_pupil[1] * left_eye.shape[0] / EYE_DISPLAY_HEIGHT)
+                            frame_x = left_eye_pos[0] + original_x
+                            frame_y = left_eye_pos[1] + original_y
+                            
+                            # Draw on main frame
+                            cv2.circle(display_frame, (frame_x, frame_y), 4, (0, 255, 0), -1, cv2.LINE_AA)
+                else:
+                    # Eye is closed, clear history for fresh tracking when reopened
+                    left_pupil_history.clear()
+                    left_last_pos = None
+                    left_stuck_since = 0
         
         # Process right eye (which is on the left side of the flipped image)
         if right_eye.size > 0:
@@ -309,31 +419,44 @@ while True:
                 # Resize to constant size
                 right_eye_display = cv2.resize(right_eye_color, (EYE_DISPLAY_WIDTH, EYE_DISPLAY_HEIGHT))
                 
-                # Convert the zoomed eye to grayscale for pupil detection
-                right_eye_display_gray = cv2.cvtColor(right_eye_display, cv2.COLOR_BGR2GRAY)
-                
-                # Detect pupil on the zoomed eye image
-                right_pupil_x, right_pupil_y = detect_pupil(right_eye_display_gray)
-                
-                # Draw pupil on zoomed view if detected
-                if right_pupil_x is not None and right_pupil_y is not None:
-                    # Apply smoothing
-                    smooth_right_pupil = smooth_position((right_pupil_x, right_pupil_y), right_pupil_history)
+                # Only detect pupil if eye is open
+                if right_eye_open:
+                    # Convert the zoomed eye to grayscale for pupil detection
+                    right_eye_display_gray = cv2.cvtColor(right_eye_display, cv2.COLOR_BGR2GRAY)
                     
-                    if smooth_right_pupil:
-                        # Draw on zoomed view
-                        cv2.circle(right_eye_display, smooth_right_pupil, 5, (0, 255, 0), -1, cv2.LINE_AA)
+                    # Detect pupil on the zoomed eye image
+                    right_pupil_x, right_pupil_y = detect_pupil(right_eye_display_gray)
+                    
+                    # Draw pupil on zoomed view if detected
+                    if right_pupil_x is not None and right_pupil_y is not None:
+                        # Apply smoothing with timeout tracking and stuck detection
+                        smooth_right_pupil, right_pupil_last_updated, right_last_pos, right_stuck_since = smooth_position(
+                            (right_pupil_x, right_pupil_y), 
+                            right_pupil_history,
+                            right_pupil_last_updated,
+                            right_last_pos,
+                            right_stuck_since
+                        )
                         
-                        # Convert back to original frame coordinates for main display
-                        original_x = int(smooth_right_pupil[0] * right_eye.shape[1] / EYE_DISPLAY_WIDTH)
-                        original_y = int(smooth_right_pupil[1] * right_eye.shape[0] / EYE_DISPLAY_HEIGHT)
-                        frame_x = right_eye_pos[0] + original_x
-                        frame_y = right_eye_pos[1] + original_y
-                        
-                        # Draw on main frame
-                        cv2.circle(display_frame, (frame_x, frame_y), 4, (0, 255, 0), -1, cv2.LINE_AA)
+                        if smooth_right_pupil:
+                            # Draw on zoomed view
+                            cv2.circle(right_eye_display, smooth_right_pupil, 5, (0, 255, 0), -1, cv2.LINE_AA)
+                            
+                            # Convert back to original frame coordinates for main display
+                            original_x = int(smooth_right_pupil[0] * right_eye.shape[1] / EYE_DISPLAY_WIDTH)
+                            original_y = int(smooth_right_pupil[1] * right_eye.shape[0] / EYE_DISPLAY_HEIGHT)
+                            frame_x = right_eye_pos[0] + original_x
+                            frame_y = right_eye_pos[1] + original_y
+                            
+                            # Draw on main frame
+                            cv2.circle(display_frame, (frame_x, frame_y), 4, (0, 255, 0), -1, cv2.LINE_AA)
+                else:
+                    # Eye is closed, clear history for fresh tracking when reopened
+                    right_pupil_history.clear()
+                    right_last_pos = None
+                    right_stuck_since = 0
         
-        # Draw thin green lines around the eyes instead of red dots
+        # Draw thin green lines around the eyes
         # Left eye outline
         left_eye_points_array = np.array([(landmarks.part(point).x, landmarks.part(point).y) for point in left_eye_points])
         cv2.polylines(display_frame, [left_eye_points_array], True, (0, 255, 0), 1, cv2.LINE_AA)
@@ -345,7 +468,6 @@ while True:
     # Overlay eye views on top of the main video
     # Calculate positions for eye views
     margin = 20
-    label_margin = 5
     
     # Left eye overlay position (top-left corner)
     left_x = margin

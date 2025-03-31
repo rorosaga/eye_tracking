@@ -18,13 +18,23 @@ HEATMAP_DECAY = 0.995  # Decay factor for heatmap (higher = longer persistence)
 HEATMAP_INTENSITY = 0.2  # Intensity of new gaze points
 GAZE_HISTORY_LENGTH = 10  # Length of gaze history for smoothing
 DISPLAY_HEATMAP = True  # Toggle heatmap display
+FLIP_HORIZONTAL = True  # Flip video horizontally to correct mirror effect
+FULLSCREEN = True  # Enable maximized window mode (not true fullscreen)
 
 # Initialize face detector and landmark predictor
 detector = dlib.get_frontal_face_detector()
 predictor = dlib.shape_predictor(FACE_DETECTOR_PATH)
 
 # Create a named window and start webcam
-cv2.namedWindow('Gaze Tracker')
+cv2.namedWindow('Gaze Tracker', cv2.WINDOW_NORMAL)
+if FULLSCREEN:
+    # Set window to be maximized but not true fullscreen
+    cv2.setWindowProperty('Gaze Tracker', cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_AUTOSIZE)
+    # Get screen resolution for maximizing window
+    screen_width = cv2.getWindowImageRect('Gaze Tracker')[2]
+    screen_height = cv2.getWindowImageRect('Gaze Tracker')[3]
+    # Resize window to match screen size
+    cv2.resizeWindow('Gaze Tracker', screen_width, screen_height)
 cap = cv2.VideoCapture(0)
 
 # Get initial frame dimensions
@@ -32,6 +42,10 @@ ret, frame = cap.read()
 if not ret:
     print("Failed to capture initial frame")
     exit()
+
+# Flip the frame horizontally if enabled
+if FLIP_HORIZONTAL:
+    frame = cv2.flip(frame, 1)  # 1 = horizontal flip
 
 frame_height, frame_width = frame.shape[:2]
 
@@ -380,6 +394,10 @@ try:
             print("Failed to capture frame")
             break
         
+        # Flip frame horizontally if enabled
+        if FLIP_HORIZONTAL:
+            frame = cv2.flip(frame, 1)  # 1 = horizontal flip
+        
         # Create copy for display
         display_frame = frame.copy()
         
@@ -504,14 +522,33 @@ try:
         # Show the frame
         cv2.imshow('Gaze Tracker', display_frame)
         
-        # Handle key presses
+        # Handle key presses and window events
         key = cv2.waitKey(1) & 0xFF
+        
+        # Check if window was closed
+        if cv2.getWindowProperty('Gaze Tracker', cv2.WND_PROP_VISIBLE) < 1:
+            break
         
         if key == ord('q'):
             break
         elif key == ord('h'):
             # Toggle heatmap display
             DISPLAY_HEATMAP = not DISPLAY_HEATMAP
+        elif key == ord('f'):
+            # Toggle fullscreen
+            FULLSCREEN = not FULLSCREEN
+            if FULLSCREEN:
+                # Set window to be maximized but not true fullscreen
+                cv2.setWindowProperty('Gaze Tracker', cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_AUTOSIZE)
+                # Get current screen resolution
+                screen_width = cv2.getWindowImageRect('Gaze Tracker')[2]
+                screen_height = cv2.getWindowImageRect('Gaze Tracker')[3]
+                # Resize window to match screen size
+                cv2.resizeWindow('Gaze Tracker', screen_width, screen_height)
+            else:
+                # Return to normal window size
+                cv2.setWindowProperty('Gaze Tracker', cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow('Gaze Tracker', 1024, 768)  # Default size
         elif key == ord('s'):
             # Save heatmap
             save_heatmap()

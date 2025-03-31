@@ -6,9 +6,6 @@ import time
 import os
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from pygaze.display import Display
-from pygaze.screen import Screen
-from pygaze.eyetracker import EyeTracker
 import threading
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -807,7 +804,7 @@ def map_gaze_to_webpage(gaze_point):
     browser_header_height = 80
     
     # X-axis correction factor to fix leftward shift
-    x_correction = 40 # Pixels to shift right 
+    x_correction = 1000 # Pixels to shift right 
     
     # Check if gaze is in browser content area
     if (browser_x <= x <= browser_x + browser_w and 

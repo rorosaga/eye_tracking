@@ -10,6 +10,13 @@ from pygaze.display import Display
 from pygaze.screen import Screen
 from pygaze.eyetracker import EyeTracker
 import threading
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import io
+from PIL import Image
 
 # Configuration
 FACE_DETECTOR_PATH = "../data/shape_predictor_68_face_landmarks.dat"
@@ -20,6 +27,20 @@ GAZE_HISTORY_LENGTH = 10  # Length of gaze history for smoothing
 DISPLAY_HEATMAP = True  # Toggle heatmap display
 FLIP_HORIZONTAL = True  # Flip video horizontally to correct mirror effect
 FULLSCREEN = True  # Enable maximized window mode (not true fullscreen)
+USE_BROWSER = True  # Enable browser integration with Selenium automatically
+AUTO_LAUNCH_BROWSER = True  # Automatically launch browser after calibration
+BROWSER_URL = "https://www.adidas.es/zapatillas-hombre"  # Default URL to open
+ENABLE_LIVE_HEATMAP = False  # Disable live heatmap to avoid blue tint issues
+
+# Selenium/Browser variables
+browser = None
+browser_position = (0, 0)
+browser_size = (0, 0)
+scroll_position = 0
+webpage_height = 0
+webpage_width = 0
+web_gaze_points = []  # Store gaze points relative to webpage (x, y, timestamp)
+full_webpage_image = None  # Store the full webpage image captured at start
 
 # Initialize face detector and landmark predictor
 detector = dlib.get_frontal_face_detector()
@@ -385,8 +406,493 @@ def update_fixations(gaze_point):
             fixation_start_time = current_time
             fixation_duration = 0
 
+def start_browser_tracking(url=BROWSER_URL):
+    """Start browser with Selenium for gaze tracking on a webpage"""
+    global browser, browser_position, browser_size, USE_BROWSER
+    global webpage_height, webpage_width, scroll_position, web_gaze_points
+    global full_webpage_image  # Store the full webpage image
+    
+    # Reset gaze points when starting a new browser session
+    web_gaze_points = []
+    
+    print("Starting browser for eye tracking...")
+    
+    # Configure Chrome options
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")
+    chrome_options.add_argument("--disable-infobars")
+    chrome_options.add_argument("--disable-extensions")
+    
+    # Initialize browser
+    browser = webdriver.Chrome(options=chrome_options)
+    
+    # Initialize scroll position
+    scroll_position = 0
+    
+    # Navigate to URL
+    browser.get(url)
+    
+    # Accept cookies if present (common on European sites)
+    try:
+        # More robust cookie acceptance with multiple patterns
+        cookie_buttons = WebDriverWait(browser, 5).until(
+            EC.presence_of_all_elements_located((By.XPATH, 
+                "//button[contains(text(), 'Accept') or contains(text(), 'Aceptar') or contains(text(), 'cookies') or contains(text(), 'Cookie')]"))
+        )
+        
+        for button in cookie_buttons:
+            try:
+                button.click()
+                print("Clicked cookie button")
+                break
+            except:
+                continue
+    except:
+        print("No cookie dialog found or couldn't be clicked.")
+    
+    # Wait for page to fully load
+    time.sleep(2)
+    
+    # Get browser window position and size
+    browser_position = (browser.get_window_position()['x'], browser.get_window_position()['y'])
+    browser_size = (browser.get_window_size()['width'], browser.get_window_size()['height'])
+    
+    # Get actual webpage dimensions
+    webpage_height = browser.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)")
+    webpage_width = browser.execute_script("return Math.max(document.body.scrollWidth, document.documentElement.scrollWidth)")
+    
+    print(f"Browser started at position {browser_position}, size {browser_size}")
+    print(f"Webpage dimensions: {webpage_width}x{webpage_height}")
+    
+    # Capture the full webpage at the beginning
+    print("Capturing full webpage screenshot immediately...")
+    full_webpage_image = capture_full_webpage()
+    
+    if full_webpage_image is not None:
+        print("Full webpage captured successfully! Eye tracking will map to this image.")
+        # Save the initial capture
+        try:
+            if not os.path.exists("../output"):
+                os.makedirs("../output")
+                
+            full_webpage_image.save("../output/output_image.png")
+            print("Saved initial webpage screenshot to ../output/output_image.png")
+        except Exception as e:
+            print(f"Error saving initial screenshot: {e}")
+            try:
+                if not os.path.exists("./output"):
+                    os.makedirs("./output")
+                    
+                full_webpage_image.save("./output/output_image.png")
+                print("Saved initial webpage screenshot to ./output/output_image.png")
+            except Exception as e2:
+                print(f"Error saving to alternative location: {e2}")
+    else:
+        print("WARNING: Failed to capture full webpage. Eye tracking may not be accurate.")
+    
+    # Set flag to enable browser integration
+    USE_BROWSER = True
+    
+    # Start monitoring scroll position in a background thread
+    threading.Thread(target=monitor_scroll_position, daemon=True).start()
+    
+    return browser
+
+def monitor_scroll_position():
+    """Monitor scroll position in browser"""
+    global scroll_position, browser
+    
+    while browser is not None:
+        try:
+            scroll_position = browser.execute_script("return window.pageYOffset")
+            time.sleep(0.1)  # Check 10 times per second
+        except:
+            # Browser probably closed
+            break
+
+def overlay_heatmap_on_browser():
+    """Overlays a semi-transparent heatmap on the browser in real-time"""
+    global browser, web_gaze_points, webpage_height, webpage_width
+    
+    # Wait a bit for the browser to be fully initialized
+    time.sleep(1)
+    
+    # Track when we last updated the heatmap
+    last_update_time = 0
+    update_interval = 0.3  # Update every 300ms for better performance
+    
+    # Store a reference to the base64 heatmap to avoid unnecessary updates
+    last_heatmap_data = None
+    
+    while browser is not None:
+        try:
+            current_time = time.time()
+            
+            # Only update if we have gaze data and enough time has passed
+            if (web_gaze_points and 
+                len(web_gaze_points) > 5 and 
+                current_time - last_update_time > update_interval):
+                
+                # Create a simplified heatmap for injection
+                heatmap_canvas = np.zeros((webpage_height, webpage_width), dtype=np.float32)
+                
+                # Get viewport dimensions
+                viewport_height = browser.execute_script("return window.innerHeight")
+                viewport_width = browser.execute_script("return window.innerWidth")
+                current_scroll = scroll_position if scroll_position is not None else 0
+                
+                # Focus on points that would be visible in the current viewport
+                # and recent points (last 50 for better performance)
+                visible_points = []
+                for x, y, ts in web_gaze_points[-200:]:  # Consider last 200 points max
+                    # Check if the point is in or near the current viewport
+                    if 0 <= x < viewport_width and current_scroll - 100 <= y <= current_scroll + viewport_height + 100:
+                        visible_points.append((x, y, ts))
+                
+                # Use more recent points with higher intensity
+                for i, (x, y, _) in enumerate(visible_points[-50:]):
+                    if 0 <= x < webpage_width and 0 <= y < webpage_height:
+                        # More recent points are brighter
+                        intensity = 0.3 + (i / 50) * 0.7
+                        # Draw a simple blob, bigger for more recent points
+                        size = 30 + int((i / 50) * 20)
+                        cv2.circle(heatmap_canvas, (int(x), int(y)), size, intensity, -1)
+                
+                # Apply gaussian blur for smoother heatmap
+                heatmap_canvas = cv2.GaussianBlur(heatmap_canvas, (31, 31), 15)
+                
+                # Normalize and convert to colors
+                heatmap_canvas = np.clip(heatmap_canvas, 0, 1)
+                heatmap_bytes = cv2.imencode('.png', 
+                                           cv2.applyColorMap(np.uint8(heatmap_canvas * 255), 
+                                                           cv2.COLORMAP_JET))[1].tobytes()
+                
+                # Convert to base64 for inline display
+                import base64
+                heatmap_b64 = base64.b64encode(heatmap_bytes).decode('utf-8')
+                
+                # Only update if the heatmap has changed
+                if heatmap_b64 != last_heatmap_data:
+                    # Inject overlay div if it doesn't exist yet, or update it
+                    browser.execute_script("""
+                        var heatmapOverlay = document.getElementById('gaze_heatmap_overlay');
+                        if (!heatmapOverlay) {
+                            // Create overlay if it doesn't exist
+                            heatmapOverlay = document.createElement('div');
+                            heatmapOverlay.id = 'gaze_heatmap_overlay';
+                            heatmapOverlay.style.position = 'fixed';  // Fixed to viewport instead of absolute
+                            heatmapOverlay.style.top = '0';
+                            heatmapOverlay.style.left = '0';
+                            heatmapOverlay.style.width = '100%';
+                            heatmapOverlay.style.height = '100%';  // Cover viewport only
+                            heatmapOverlay.style.pointerEvents = 'none';
+                            heatmapOverlay.style.zIndex = '9999';
+                            heatmapOverlay.style.opacity = '0.6';
+                            
+                            // Create image element
+                            var img = document.createElement('img');
+                            img.id = 'gaze_heatmap_img';
+                            img.style.width = '100%';
+                            img.style.height = '100%';
+                            img.style.objectFit = 'cover';
+                            heatmapOverlay.appendChild(img);
+                            
+                            document.body.appendChild(heatmapOverlay);
+                        }
+                        
+                        // Update the image source
+                        document.getElementById('gaze_heatmap_img').src = 'data:image/png;base64,""" + heatmap_b64 + """';
+                    """)
+                    
+                    # Store for comparison
+                    last_heatmap_data = heatmap_b64
+                    
+                # Update timestamp
+                last_update_time = current_time
+            
+            # Sleep a short time to avoid high CPU usage
+            time.sleep(0.1)
+            
+        except Exception as e:
+            print(f"Error updating browser heatmap: {e}")
+            # Don't break on errors, just try again
+            time.sleep(0.5)
+
+def map_gaze_to_webpage(gaze_point):
+    """Map gaze point on screen to position on webpage"""
+    global browser_position, browser_size, scroll_position
+    
+    if gaze_point is None or browser is None or scroll_position is None:
+        return None
+    
+    # Check if gaze is within browser window
+    x, y = gaze_point
+    browser_x, browser_y = browser_position
+    browser_w, browser_h = browser_size
+    
+    # Adjust for window decoration (approximately)
+    browser_header_height = 80  # Approximate height of browser header
+    
+    # Check if gaze is in browser content area
+    if (browser_x <= x <= browser_x + browser_w and 
+        browser_y + browser_header_height <= y <= browser_y + browser_h):
+        
+        # Calculate position relative to webpage (including scroll)
+        web_x = x - browser_x
+        web_y = y - (browser_y + browser_header_height) + scroll_position
+        
+        return (web_x, web_y)
+    
+    return None
+
+def capture_full_webpage():
+    """Capture full webpage screenshot"""
+    global browser, webpage_height, webpage_width
+    
+    if browser is None:
+        print("Browser not active, can't capture webpage")
+        return None
+    
+    print("Capturing full webpage screenshot...")
+    print(f"Website dimensions: {webpage_width}x{webpage_height}")
+    
+    try:
+        # Sanity check webpage dimensions - use defaults if problematic
+        if webpage_height <= 0 or webpage_height > 50000:
+            print(f"Invalid webpage height detected: {webpage_height}, using fallback value")
+            webpage_height = browser.execute_script("return window.innerHeight * 5")  # Rough estimate
+        
+        if webpage_width <= 0 or webpage_width > 10000:
+            print(f"Invalid webpage width detected: {webpage_width}, using fallback value")
+            webpage_width = browser.execute_script("return window.innerWidth")
+    
+        # Create a canvas with the full webpage dimensions
+        full_screenshot = Image.new('RGB', (webpage_width, webpage_height))
+        
+        # Get original scroll position to restore later
+        original_scroll = browser.execute_script("return window.pageYOffset")
+        
+        # Remove any blue tint or overlays that might be present
+        browser.execute_script("""
+            var overlay = document.getElementById('gaze_heatmap_overlay');
+            if (overlay) overlay.remove();
+            
+            // Remove any style elements that might cause blue tint
+            var styles = document.querySelectorAll('style');
+            for (var i = 0; i < styles.length; i++) {
+                if (styles[i].innerHTML.indexOf('blue') !== -1 || 
+                    styles[i].innerHTML.indexOf('rgba(0,0,255') !== -1 ||
+                    styles[i].innerHTML.indexOf('overlay') !== -1) {
+                    styles[i].remove();
+                }
+            }
+        """)
+        
+        # Wait a moment for the page to settle
+        time.sleep(0.5)
+        
+        # Scroll through the page and take screenshots
+        viewport_height = browser.execute_script("return window.innerHeight")
+        
+        print(f"Capturing screenshot in chunks (viewport height: {viewport_height}px)")
+        
+        # Use larger steps for very tall pages but ensure some overlap for proper stitching
+        step_size = max(viewport_height - 100, viewport_height // 2)
+        max_scroll_attempts = min(30, webpage_height // step_size + 2)  # Limit max scroll attempts
+        
+        for i, scroll_y in enumerate(range(0, webpage_height, step_size)):
+            if i >= max_scroll_attempts:
+                print(f"Reached maximum scroll attempts ({max_scroll_attempts}), stopping capture")
+                break
+                
+            # Scroll to position
+            browser.execute_script(f"window.scrollTo(0, {scroll_y})")
+            time.sleep(0.3)  # Wait longer for rendering and any lazy-loaded content
+            
+            # Get screenshot
+            try:
+                screenshot = browser.get_screenshot_as_png()
+                screenshot = Image.open(io.BytesIO(screenshot))
+                
+                # Determine vertical position in the final image
+                current_scroll = browser.execute_script("return window.pageYOffset")
+                
+                print(f"  - Captured section at scroll position {current_scroll}")
+                
+                # Paste into the full screenshot
+                full_screenshot.paste(screenshot, (0, current_scroll))
+            except Exception as section_error:
+                print(f"Error capturing section at scroll position {scroll_y}: {section_error}")
+                # Continue to next section rather than aborting
+                continue
+        
+        try:
+            # Restore original scroll position
+            browser.execute_script(f"window.scrollTo(0, {original_scroll})")
+        except:
+            # Not critical if this fails
+            pass
+            
+        print("Full webpage capture complete")
+        
+        return full_screenshot
+        
+    except Exception as e:
+        print(f"Error capturing full webpage: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def generate_webpage_heatmap():
+    """Generate heatmap overlay for the full webpage"""
+    global web_gaze_points, webpage_height, webpage_width, full_webpage_image
+    
+    if not web_gaze_points:
+        print("No gaze data collected for webpage")
+        return None
+    
+    if full_webpage_image is None:
+        print("No webpage image was captured, cannot generate heatmap")
+        return None
+    
+    # Get image dimensions from the captured image
+    img_width, img_height = full_webpage_image.size
+    
+    # Create heatmap canvas matching the full webpage image
+    heatmap_canvas = np.zeros((img_height, img_width), dtype=np.float32)
+    
+    print(f"Generating heatmap with dimensions {img_width}x{img_height} from {len(web_gaze_points)} gaze points")
+    
+    # Add each gaze point to the heatmap
+    for x, y, _ in web_gaze_points:
+        # Make sure coordinates are within bounds
+        if 0 <= x < img_width and 0 <= y < img_height:
+            # Create a gaussian blob around the gaze point
+            sigma = 50  # Size of gaussian blob
+            y_pos = min(max(0, int(y)), img_height-1)
+            x_pos = min(max(0, int(x)), img_width-1)
+            
+            # We'll use a simpler approach since the webpage can be very large
+            # Create a smaller gaussian and paste it onto the large canvas
+            size = sigma * 4 + 1
+            small_gaussian = np.zeros((size, size), dtype=np.float32)
+            center = (size // 2, size // 2)
+            cv2.circle(small_gaussian, center, sigma, 1.0, -1)
+            small_gaussian = cv2.GaussianBlur(small_gaussian, (size, size), sigma/2)
+            
+            # Normalize the small gaussian
+            if np.max(small_gaussian) > 0:
+                small_gaussian = small_gaussian / np.max(small_gaussian)
+            
+            # Determine paste region
+            y_start = max(0, y_pos - size//2)
+            y_end = min(img_height, y_pos + size//2 + 1)
+            x_start = max(0, x_pos - size//2)
+            x_end = min(img_width, x_pos + size//2 + 1)
+            
+            # Determine the section of the small gaussian to use
+            small_y_start = max(0, size//2 - y_pos)
+            small_y_end = small_y_start + (y_end - y_start)
+            small_x_start = max(0, size//2 - x_pos)
+            small_x_end = small_x_start + (x_end - x_start)
+            
+            # Add to heatmap
+            try:
+                heatmap_slice = small_gaussian[small_y_start:small_y_end, small_x_start:small_x_end]
+                heatmap_canvas[y_start:y_end, x_start:x_end] += heatmap_slice * HEATMAP_INTENSITY
+            except:
+                # Skip this point if there's an error (boundary issues)
+                pass
+    
+    # Normalize the heatmap
+    heatmap_canvas = np.clip(heatmap_canvas, 0, 1)
+    
+    # Convert to colormap
+    heatmap_colored = cv2.applyColorMap(np.uint8(heatmap_canvas * 255), cv2.COLORMAP_JET)
+    
+    return heatmap_colored
+
+def save_webpage_heatmap():
+    """Save full webpage with heatmap overlay"""
+    global full_webpage_image, web_gaze_points
+    
+    if full_webpage_image is None:
+        print("No webpage image captured, cannot save heatmap")
+        return
+    
+    if not web_gaze_points or len(web_gaze_points) < 5:
+        print("Not enough gaze data for heatmap, only saving webpage")
+        try:
+            if not os.path.exists("../output"):
+                os.makedirs("../output")
+            full_webpage_image.save("../output/output_image.png")
+            print("Saved webpage image only (no heatmap) to ../output/output_image.png")
+        except Exception as e:
+            print(f"Error saving webpage image: {e}")
+        return
+    
+    try:
+        # Create output directory if needed
+        if not os.path.exists("../output"):
+            os.makedirs("../output")
+        
+        # Generate heatmap
+        print("Generating heatmap overlay on captured webpage...")
+        heatmap_overlay = generate_webpage_heatmap()
+        
+        if heatmap_overlay is None:
+            print("Failed to generate heatmap, saving webpage only")
+            full_webpage_image.save("../output/output_image.png")
+            return
+        
+        # Convert PIL Image to numpy array
+        webpage_np = np.array(full_webpage_image)
+        
+        # Make sure dimensions match
+        if webpage_np.shape[:2] != heatmap_overlay.shape[:2]:
+            heatmap_overlay = cv2.resize(
+                heatmap_overlay, 
+                (webpage_np.shape[1], webpage_np.shape[0]), 
+                interpolation=cv2.INTER_AREA
+            )
+        
+        # Create alpha channel based on heatmap intensity
+        heatmap_gray = cv2.cvtColor(heatmap_overlay, cv2.COLOR_BGR2GRAY)
+        alpha = (heatmap_gray > 10).astype(np.float32) * 0.7
+        alpha = alpha.reshape(alpha.shape[0], alpha.shape[1], 1)
+        
+        # Blend images
+        blended = webpage_np * (1 - alpha) + heatmap_overlay * alpha
+        
+        # Save both the original webpage and the heatmap overlay
+        full_webpage_image.save("../output/output_image.png")
+        print("Saved webpage image to ../output/output_image.png")
+        
+        cv2.imwrite("../output/output_image_heatmap.png", blended.astype(np.uint8))
+        print("Saved heatmap overlay to ../output/output_image_heatmap.png")
+        
+        # Save raw gaze data
+        with open("../output/webpage_gaze.csv", 'w') as f:
+            f.write("x,y,timestamp\n")
+            for x, y, ts in web_gaze_points:
+                f.write(f"{x},{y},{ts}\n")
+        print("Saved gaze data to ../output/webpage_gaze.csv")
+    
+    except Exception as e:
+        print(f"Error saving heatmap: {e}")
+        import traceback
+        traceback.print_exc()
+
 # Main loop
 try:
+    print("Starting eye tracking with automatic browser launch")
+    print("Please complete calibration by looking at the red circles and pressing SPACE")
+    
+    # Check if we automatically enable browser mode after calibration
+    if AUTO_LAUNCH_BROWSER:
+        print("Browser will launch automatically after calibration")
+        print("Controls: 'h' to toggle heatmap, 'b' to toggle browser, 's' to save data, 'q' to quit")
+    
     while True:
         # Capture frame
         ret, frame = cap.read()
@@ -486,7 +992,14 @@ try:
                 
                 if smooth_gaze_point is not None:
                     # Record gaze point with timestamp
-                    gaze_points_data.append((time.time(), smooth_gaze_point[0], smooth_gaze_point[1]))
+                    current_time = time.time()
+                    gaze_points_data.append((current_time, smooth_gaze_point[0], smooth_gaze_point[1]))
+                    
+                    # Map to webpage coordinates if browser is active
+                    if USE_BROWSER and browser is not None:
+                        web_point = map_gaze_to_webpage(smooth_gaze_point)
+                        if web_point is not None:
+                            web_gaze_points.append((web_point[0], web_point[1], current_time))
                     
                     # Update fixation data
                     update_fixations(smooth_gaze_point)
@@ -497,6 +1010,18 @@ try:
                     # Draw gaze point
                     cv2.circle(display_frame, smooth_gaze_point, 10, (0, 0, 255), -1)
                     cv2.circle(display_frame, smooth_gaze_point, 4, (255, 255, 255), -1)
+                    
+                    # Display webpage tracking info if active
+                    if USE_BROWSER and browser is not None:
+                        web_point = map_gaze_to_webpage(smooth_gaze_point)
+                        if web_point is not None:
+                            cv2.putText(display_frame, f"Web: {int(web_point[0])}, {int(web_point[1])}", 
+                                      (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                        
+                        # Fix: Check if scroll_position is None before converting to int
+                        if scroll_position is not None:
+                            cv2.putText(display_frame, f"Scroll: {int(scroll_position)}", 
+                                      (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # Overlay heatmap if enabled and available
         if DISPLAY_HEATMAP and heatmap_updated and calibrated:
@@ -549,10 +1074,24 @@ try:
                 # Return to normal window size
                 cv2.setWindowProperty('Gaze Tracker', cv2.WND_PROP_AUTOSIZE, cv2.WINDOW_NORMAL)
                 cv2.resizeWindow('Gaze Tracker', 1024, 768)  # Default size
+        elif key == ord('b'):
+            # Toggle browser mode
+            if not USE_BROWSER:
+                threading.Thread(target=start_browser_tracking, daemon=True).start()
+            else:
+                if browser is not None:
+                    print("Closing browser and saving webpage heatmap...")
+                    save_webpage_heatmap()
+                    browser.quit()
+                    browser = None
+                    USE_BROWSER = False
+                    print("Browser closed")
         elif key == ord('s'):
             # Save heatmap
             save_heatmap()
             save_gaze_data()
+            if USE_BROWSER and browser is not None:
+                save_webpage_heatmap()
         elif key == ord('r'):
             # Reset calibration
             calibration_mode = True
@@ -561,6 +1100,13 @@ try:
             calibrated = False
             heatmap = np.zeros((frame_height, frame_width), dtype=np.float32)
             heatmap_updated = False
+            
+            # Close browser if open
+            if browser is not None:
+                browser.quit()
+                browser = None
+                USE_BROWSER = False
+                
         elif key == ord(' '):
             # Process calibration point
             if calibration_mode and left_pupil is not None and right_pupil is not None:
@@ -579,16 +1125,37 @@ try:
                     calibration_mode = False
                     calibrated = True
                     print("Calibration complete!")
+                    
+                    # If browser mode is enabled, start it now after calibration
+                    if AUTO_LAUNCH_BROWSER and browser is None:
+                        threading.Thread(target=start_browser_tracking, daemon=True).start()
 
 except KeyboardInterrupt:
     print("Stopping...")
 finally:
     # Cleanup
+    if browser is not None:
+        try:
+            print("Saving webpage heatmap before exit...")
+            save_webpage_heatmap()
+            print("Browser cleanup...")
+            browser.quit()
+            print("Browser closed")
+        except Exception as exit_error:
+            print(f"Error during browser cleanup: {exit_error}")
+            import traceback
+            traceback.print_exc()
+    
+    print("Releasing camera...")
     cap.release()
+    print("Closing windows...")
     cv2.destroyAllWindows()
     
     # Save data before exit
+    print("Saving eye tracking data...")
     if heatmap_updated:
         save_heatmap()
     if len(gaze_points_data) > 0:
         save_gaze_data()
+    
+    print("Cleanup complete. Exiting.")

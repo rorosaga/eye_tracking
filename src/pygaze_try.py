@@ -17,6 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import io
 from PIL import Image
+import random
 
 # Configuration
 FACE_DETECTOR_PATH = "../data/shape_predictor_68_face_landmarks.dat"
@@ -432,21 +433,71 @@ def start_browser_tracking(url=BROWSER_URL):
     # Navigate to URL
     browser.get(url)
     
-    # Accept cookies if present (common on European sites)
+    # Add disclaimer overlay immediately
+    add_disclaimer_overlay()
+    print("Added disclaimer overlay - page will be captured after accepting cookies")
+    
+    # Accept cookies using the specific button ID provided by the user
     try:
-        # More robust cookie acceptance with multiple patterns
-        cookie_buttons = WebDriverWait(browser, 5).until(
-            EC.presence_of_all_elements_located((By.XPATH, 
-                "//button[contains(text(), 'Accept') or contains(text(), 'Aceptar') or contains(text(), 'cookies') or contains(text(), 'Cookie')]"))
-        )
+        print("Looking for the specific cookie consent button...")
         
-        for button in cookie_buttons:
+        # First try the specific button ID the user provided
+        try:
+            # Look for the specific button by ID
+            cookie_button = WebDriverWait(browser, 5).until(
+                EC.element_to_be_clickable((By.ID, "glass-gdpr-default-consent-accept-button"))
+            )
+            
+            if cookie_button:
+                print("Found cookie button with specific ID")
+                cookie_button.click()
+                print("Clicked specific cookie button")
+                time.sleep(2)  # Wait for dialog to close
+        except Exception as e:
+            print(f"Specific button not found: {e}, trying alternative methods")
+            
+            # If specific button fails, try text content
             try:
-                button.click()
-                print("Clicked cookie button")
-                break
+                cookie_button = WebDriverWait(browser, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Aceptar seguimiento')]"))
+                )
+                
+                if cookie_button:
+                    print("Found cookie button by text content")
+                    cookie_button.click()
+                    print("Clicked cookie button by text")
+                    time.sleep(2)
             except:
-                continue
+                # Fall back to previous methods
+                cookie_patterns = [
+                    "//button[contains(text(), 'Accept')]",
+                    "//button[contains(text(), 'Aceptar')]",
+                    "//button[contains(@class, 'cookie')]",
+                    "//button[contains(@id, 'cookie')]",
+                    "//div[contains(@class, 'cookie')]//button",
+                    "//div[contains(@id, 'cookie')]//button",
+                    "//a[contains(text(), 'Accept')]"
+                ]
+                
+                for pattern in cookie_patterns:
+                    try:
+                        buttons = WebDriverWait(browser, 2).until(
+                            EC.presence_of_all_elements_located((By.XPATH, pattern))
+                        )
+                        
+                        for button in buttons:
+                            if button.is_displayed():
+                                print(f"Found cookie button with pattern: {pattern}")
+                                button.click()
+                                print("Clicked cookie button")
+                                time.sleep(1)  # Wait for dialog to close
+                                break
+                        
+                        # Break the outer loop if we clicked a button
+                        if buttons:
+                            break
+                    except:
+                        continue
     except:
         print("No cookie dialog found or couldn't be clicked.")
     
@@ -464,8 +515,12 @@ def start_browser_tracking(url=BROWSER_URL):
     print(f"Browser started at position {browser_position}, size {browser_size}")
     print(f"Webpage dimensions: {webpage_width}x{webpage_height}")
     
+    # Update the disclaimer to inform user about the scrolling process
+    update_disclaimer_for_scrolling()
+    
     # Capture the full webpage at the beginning
     print("Capturing full webpage screenshot immediately...")
+    print("Please wait as the browser automatically scrolls to capture the entire page...")
     full_webpage_image = capture_full_webpage()
     
     if full_webpage_image is not None:
@@ -496,7 +551,138 @@ def start_browser_tracking(url=BROWSER_URL):
     # Start monitoring scroll position in a background thread
     threading.Thread(target=monitor_scroll_position, daemon=True).start()
     
+    # Update the disclaimer to allow the user to close it
+    update_disclaimer_after_scrolling()
+    
     return browser
+
+def add_disclaimer_overlay():
+    """Add a disclaimer overlay to the browser window"""
+    global browser
+    
+    if browser is None:
+        return
+    
+    try:
+        # Create an overlay with disclaimer text that blocks interaction
+        browser.execute_script("""
+            // Create overlay div if it doesn't exist
+            var overlay = document.createElement('div');
+            overlay.id = 'eye_tracking_disclaimer';
+            
+            // Style the overlay
+            overlay.style.position = 'fixed';
+            overlay.style.top = '0';
+            overlay.style.left = '0';
+            overlay.style.width = '100%';
+            overlay.style.height = '100%';
+            overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.8)';
+            overlay.style.color = 'white';
+            overlay.style.zIndex = '10000';
+            overlay.style.display = 'flex';
+            overlay.style.flexDirection = 'column';
+            overlay.style.justifyContent = 'center';
+            overlay.style.alignItems = 'center';
+            overlay.style.textAlign = 'center';
+            overlay.style.fontFamily = 'Arial, sans-serif';
+            overlay.style.fontSize = '18px';
+            overlay.style.padding = '20px';
+            overlay.style.boxSizing = 'border-box';
+            
+            // Add disclaimer text
+            overlay.innerHTML = `
+                <h1 style="color: #FF5555; margin-bottom: 20px; font-size: 24px;">Eye Tracking Session in Progress</h1>
+                <p style="margin-bottom: 15px; line-height: 1.5;">This program is recording where you look on this webpage.</p>
+                <p style="margin-bottom: 15px; line-height: 1.5;">We need to accept cookies first before capturing begins.</p>
+                <p style="margin-bottom: 15px; line-height: 1.5;">Please wait while we set up the tracking session.</p>
+                <p style="color: #AAFFAA; margin-top: 20px;">Do not close this window.</p>
+            `;
+            
+            // Append to body
+            document.body.appendChild(overlay);
+        """)
+        
+        print("Added initial disclaimer overlay to browser")
+    except Exception as e:
+        print(f"Error adding disclaimer overlay: {e}")
+
+def update_disclaimer_for_scrolling():
+    """Update the disclaimer to show scrolling status"""
+    global browser
+    
+    if browser is None:
+        return
+    
+    try:
+        browser.execute_script("""
+            var overlay = document.getElementById('eye_tracking_disclaimer');
+            if (overlay) {
+                overlay.innerHTML = `
+                    <h1 style="color: #FF5555; margin-bottom: 20px; font-size: 24px;">Capturing Website</h1>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">The browser is automatically scrolling to capture the entire webpage.</p>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">This will take a few moments. Please wait...</p>
+                    <div style="width: 60px; height: 60px; margin: 20px auto; border: 5px solid #f3f3f3; border-top: 5px solid #FF5555; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+                    <style>
+                        @keyframes spin {
+                            0% { transform: rotate(0deg); }
+                            100% { transform: rotate(360deg); }
+                        }
+                    </style>
+                `;
+            }
+        """)
+        print("Updated disclaimer for scrolling phase")
+    except Exception as e:
+        print(f"Error updating disclaimer: {e}")
+
+def update_disclaimer_after_scrolling():
+    """Update the disclaimer after scrolling to allow closing"""
+    global browser
+    
+    if browser is None:
+        return
+    
+    try:
+        browser.execute_script("""
+            var overlay = document.getElementById('eye_tracking_disclaimer');
+            if (overlay) {
+                overlay.innerHTML = `
+                    <h1 style="color: #FF5555; margin-bottom: 20px; font-size: 24px;">Eye Tracking Session in Progress</h1>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">This program is recording where you look on this webpage.</p>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">A heatmap of your eye movements will be generated.</p>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">The website has been captured successfully.</p>
+                    <p style="margin-bottom: 15px; line-height: 1.5;">You can view the website through this overlay but cannot interact with it.</p>
+                    <button id="close_disclaimer" style="padding: 10px 20px; background-color: #FF5555; color: white; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; margin-top: 20px;">Close This Message</button>
+                    <p style="color: #AAFFAA; margin-top: 20px;">Close the eye tracker window when finished.</p>
+                `;
+                
+                // Add event listener for the close button
+                document.getElementById('close_disclaimer').addEventListener('click', function() {
+                    document.getElementById('eye_tracking_disclaimer').remove();
+                });
+            }
+        """)
+        print("Updated disclaimer with close button")
+    except Exception as e:
+        print(f"Error updating disclaimer after scrolling: {e}")
+
+def remove_disclaimer_overlay():
+    """Remove the disclaimer overlay from the browser window"""
+    global browser
+    
+    if browser is None:
+        return
+    
+    try:
+        browser.execute_script("""
+            var overlay = document.getElementById('eye_tracking_disclaimer');
+            if (overlay) {
+                overlay.remove();
+            }
+        """)
+        print("Removed disclaimer overlay from browser")
+    except Exception as e:
+        print(f"Error removing disclaimer overlay: {e}")
 
 def monitor_scroll_position():
     """Monitor scroll position in browser"""
@@ -633,12 +819,15 @@ def map_gaze_to_webpage(gaze_point):
     # Adjust for window decoration (approximately)
     browser_header_height = 80  # Approximate height of browser header
     
+    # X-axis correction factor to fix leftward shift (adjust as needed)
+    x_correction = 25  # Pixels to shift right - adjust this value based on testing
+    
     # Check if gaze is in browser content area
     if (browser_x <= x <= browser_x + browser_w and 
         browser_y + browser_header_height <= y <= browser_y + browser_h):
         
         # Calculate position relative to webpage (including scroll)
-        web_x = x - browser_x
+        web_x = x - browser_x + x_correction  # Add correction to fix leftward shift
         web_y = y - (browser_y + browser_header_height) + scroll_position
         
         return (web_x, web_y)
@@ -657,6 +846,14 @@ def capture_full_webpage():
     print(f"Website dimensions: {webpage_width}x{webpage_height}")
     
     try:
+        # Temporarily hide the disclaimer overlay for clean screenshots
+        browser.execute_script("""
+            var overlay = document.getElementById('eye_tracking_disclaimer');
+            if (overlay) {
+                overlay.style.display = 'none';
+            }
+        """)
+        
         # Sanity check webpage dimensions - use defaults if problematic
         if webpage_height <= 0 or webpage_height > 50000:
             print(f"Invalid webpage height detected: {webpage_height}, using fallback value")
@@ -733,6 +930,14 @@ def capture_full_webpage():
             # Not critical if this fails
             pass
             
+        # Restore the disclaimer overlay with updated content
+        browser.execute_script("""
+            var overlay = document.getElementById('eye_tracking_disclaimer');
+            if (overlay) {
+                overlay.style.display = 'flex';
+            }
+        """)
+        
         print("Full webpage capture complete")
         
         return full_screenshot
@@ -741,6 +946,18 @@ def capture_full_webpage():
         print(f"Error capturing full webpage: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Make sure to restore the disclaimer overlay even if there's an error
+        try:
+            browser.execute_script("""
+                var overlay = document.getElementById('eye_tracking_disclaimer');
+                if (overlay) {
+                    overlay.style.display = 'flex';
+                }
+            """)
+        except:
+            pass
+            
         return None
 
 def generate_webpage_heatmap():
@@ -771,6 +988,10 @@ def generate_webpage_heatmap():
             sigma = 50  # Size of gaussian blob
             y_pos = min(max(0, int(y)), img_height-1)
             x_pos = min(max(0, int(x)), img_width-1)
+            
+            # Debug print for coordinates
+            if len(web_gaze_points) < 10 or random.random() < 0.01:  # Print first few or random 1%
+                print(f"Mapped gaze point at x={x_pos}, y={y_pos}")
             
             # We'll use a simpler approach since the webpage can be very large
             # Create a smaller gaussian and paste it onto the large canvas

@@ -1,3 +1,7 @@
 opencv-python
 numpy
 dlib
+python-pygaze
+matplotlib
+selenium
+pillow

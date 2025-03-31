@@ -103,7 +103,18 @@ fixations = []  # Will store (x, y, duration) tuples
 EYE_AR_THRESHOLD = 0.2
 
 def eye_aspect_ratio(eye_points):
-    """Calculate eye aspect ratio for blink detection"""
+    """
+    Calculate eye aspect ratio for blink detection.
+    
+    Computes the ratio of vertical to horizontal distances between eye landmarks
+    to determine if an eye is open or closed.
+    
+    Args:
+        eye_points: Array of eye landmark coordinates
+        
+    Returns:
+        Aspect ratio value (lower values indicate more closed eyes)
+    """
     # Compute the euclidean distances between vertical eye landmarks
     A = np.linalg.norm(eye_points[1] - eye_points[5])
     B = np.linalg.norm(eye_points[2] - eye_points[4])
@@ -117,7 +128,19 @@ def eye_aspect_ratio(eye_points):
     return ear
 
 def get_calibration_point(index, width, height):
-    """Return position for calibration point based on index"""
+    """
+    Return position for calibration point based on index.
+    
+    Creates a 5-point calibration pattern at the corners and center of the screen.
+    
+    Args:
+        index: Calibration point index (0-4)
+        width: Screen width
+        height: Screen height
+        
+    Returns:
+        (x, y) coordinates for the calibration point
+    """
     points = [
         (int(width * 0.1), int(height * 0.1)),   # Top left
         (int(width * 0.9), int(height * 0.1)),   # Top right
@@ -132,7 +155,19 @@ def get_calibration_point(index, width, height):
         return (int(width * 0.5), int(height * 0.5))  # Default to center
 
 def draw_calibration_point(frame, point, active=True):
-    """Draw calibration target point"""
+    """
+    Draw calibration target point on the frame.
+    
+    Creates a target with outer and inner circles for the user to focus on during calibration.
+    
+    Args:
+        frame: Video frame to draw on
+        point: (x, y) coordinates for the calibration point
+        active: Whether the point is active (red) or inactive (gray)
+        
+    Returns:
+        Frame with calibration point drawn
+    """
     # Outer circle
     color = (0, 0, 255) if active else (100, 100, 100)
     cv2.circle(frame, point, 20, color, 2)
@@ -143,7 +178,20 @@ def draw_calibration_point(frame, point, active=True):
     return frame
 
 def extract_eye(frame, landmarks, eye_points):
-    """Extract eye region from facial landmarks"""
+    """
+    Extract eye region from facial landmarks.
+    
+    Creates a bounding box around eye landmarks and extracts the region from the frame.
+    Adds padding around the eye region for better pupil detection.
+    
+    Args:
+        frame: Video frame
+        landmarks: Facial landmarks from dlib
+        eye_points: List of landmark indices for the eye
+        
+    Returns:
+        Tuple of (eye_image, eye_rect) where eye_rect is (x, y, width, height)
+    """
     # Get the eye region points
     eye_region = np.array([(landmarks.part(i).x, landmarks.part(i).y) for i in eye_points])
     
@@ -167,7 +215,20 @@ def extract_eye(frame, landmarks, eye_points):
     return eye_frame, (min_x, min_y, max_x - min_x, max_y - min_y)
 
 def detect_pupil(eye_frame):
-    """Detect pupil in the eye frame"""
+    """
+    Detect pupil in the eye frame.
+    
+    Uses multiple methods to detect the pupil:
+    1. Contour detection on thresholded image
+    2. Hough circle detection as fallback
+    3. Darkest point as final fallback
+    
+    Args:
+        eye_frame: Image of eye region
+        
+    Returns:
+        (x, y) coordinates of pupil center, or (None, None) if detection fails
+    """
     if eye_frame is None or eye_frame.size == 0:
         return None, None
     
@@ -201,7 +262,7 @@ def detect_pupil(eye_frame):
             pupil_y = int(M["m01"] / M["m00"])
             return pupil_x, pupil_y
     
-    # If contour method fails, try direct circle detection
+    # If contour method fails
     circles = cv2.HoughCircles(
         blur, 
         cv2.HOUGH_GRADIENT, 
@@ -221,16 +282,28 @@ def detect_pupil(eye_frame):
         circle = circles[0, 0]
         return circle[0], circle[1]
     
-    # Final fallback - find darkest point
+    # Final fallback which is the darkest point
     minVal, _, minLoc, _ = cv2.minMaxLoc(blur)
     return minLoc[0], minLoc[1]
 
 def smooth_gaze(current_gaze, history):
-    """Apply smoothing to gaze point"""
+    """
+    Apply smoothing to gaze point.
+    
+    Uses weighted averaging of recent gaze points to reduce jitter.
+    More recent points are given exponentially higher weight.
+    
+    Args:
+        current_gaze: Current (x, y) gaze coordinates
+        history: Deque containing previous gaze points
+        
+    Returns:
+        Smoothed (x, y) gaze coordinates
+    """
     if current_gaze is None:
         return None
     
-    # Add to history
+    # Add to historyy
     history.append(current_gaze)
     
     if len(history) < 2:
@@ -241,8 +314,8 @@ def smooth_gaze(current_gaze, history):
     total_y = 0
     total_weight = 0
     
-    # Create weights dynamically based on history length
-    weights = [2**i for i in range(len(history))]  # Exponential weighting
+    # Create weigts dynamically based on history length
+    weights = [2**i for i in range(len(history))]
     
     for i, (x, y) in enumerate(history):
         weight = weights[i]
@@ -254,7 +327,19 @@ def smooth_gaze(current_gaze, history):
     return (int(total_x / total_weight), int(total_y / total_weight))
 
 def map_eye_to_screen(left_pupil, right_pupil):
-    """Map eye positions to screen coordinates using calibration data"""
+    """
+    Map eye positions to screen coordinates using calibration data.
+    
+    Uses linear mapping from eye space to screen space based on calibration points.
+    Takes an average of both eyes for better accuracy.
+    
+    Args:
+        left_pupil: (x, y) coordinates of left pupil
+        right_pupil: (x, y) coordinates of right pupil
+        
+    Returns:
+        (x, y) coordinates on screen, or None if mapping fails
+    """
     global calibrated, smooth_gaze_point, last_gaze_update
     
     # Only proceed if we have calibration data and valid pupil positions
@@ -266,13 +351,10 @@ def map_eye_to_screen(left_pupil, right_pupil):
     avg_pupil_y = (left_pupil[1] + right_pupil[1]) / 2
     
     # Simple linear mapping from pupil position to screen position
-    # Get min/max values from calibration data
     eye_x_values = [p[0] for p in calibration_eye_positions]
     eye_y_values = [p[1] for p in calibration_eye_positions]
-    screen_x_values = [p[0] for p in calibration_points]
-    screen_y_values = [p[1] for p in calibration_points]
     
-    # Calculate normalized position
+    # Normalize the positions for better accuracy
     try:
         x_min, x_max = min(eye_x_values), max(eye_x_values)
         y_min, y_max = min(eye_y_values), max(eye_y_values)
@@ -296,7 +378,15 @@ def map_eye_to_screen(left_pupil, right_pupil):
         return None
 
 def update_heatmap(gaze_point):
-    """Update the heatmap with a new gaze point"""
+    """
+    Update the heatmap with a new gaze point.
+    
+    Creates a gaussian blob at the gaze point and adds it to the existing heatmap.
+    Applies decay to existing heatmap to fade older gaze points.
+    
+    Args:
+        gaze_point: (x, y) coordinates of the current gaze
+    """
     global heatmap, heatmap_colormap, heatmap_updated
     
     if gaze_point is None:
@@ -309,7 +399,14 @@ def update_heatmap(gaze_point):
     x, y = gaze_point
     sigma = 50  # Size of the gaussian blob
     
-    # Ensure in bounds
+    # It checks if the gaze point is within the frame bounds
+    # If it is, it draws a circular blob at the gaze point
+    # The blob is a gaussian with a sigma of 50
+    # The blob is normalized to the maximum value of the heatmap
+    # The blob is then added to the existing heatmap
+    # The heatmap is then blurred to smooth the blob
+    # The heatmap is then normalized to the maximum value of the heatmap
+    # The heatmap is then applied to the colormap
     if 0 <= x < frame_width and 0 <= y < frame_height:
         # circular blob
         cv2.circle(temp_heatmap, (x, y), sigma, 1.0, -1)
@@ -332,7 +429,12 @@ def update_heatmap(gaze_point):
         heatmap_updated = True
 
 def save_heatmap():
-    """Save the current heatmap as an image"""
+    """
+    Save the current heatmap as an image.
+    
+    Creates output directory if needed and saves the colored heatmap
+    with a timestamp in the filename.
+    """
     if not os.path.exists("../output"):
         os.makedirs("../output")
     
@@ -342,7 +444,13 @@ def save_heatmap():
     print(f"Heatmap saved as ../output/heatmap_{timestamp}.png")
 
 def save_gaze_data():
-    """Save gaze data and fixations to CSV files"""
+    """
+    Save gaze data and fixations to CSV files.
+    
+    Creates two files:
+    1. Gaze points with timestamp and (x,y) coordinates
+    2. Fixation data with (x,y) coordinates and duration
+    """
     if not os.path.exists("../output"):
         os.makedirs("../output")
     
@@ -364,7 +472,15 @@ def save_gaze_data():
     print(f"Fixation data saved to ../output/fixations_{timestamp}.csv")
 
 def update_fixations(gaze_point):
-    """Update fixation tracking"""
+    """
+    Update fixation tracking.
+    
+    Tracks eye fixations by detecting when gaze stays within a small area.
+    Records fixation duration and position for analysis.
+    
+    Args:
+        gaze_point: Current (x, y) gaze coordinates
+    """
     global last_fixation_point, fixation_start_time, fixation_duration, fixations
     
     if gaze_point is None:
@@ -385,7 +501,7 @@ def update_fixations(gaze_point):
         fixation_start_time = current_time
         fixation_duration = 0
     else:
-        # Check if still within fixation threshold
+        # Check if still within fixation threshold (the user is looking at the same point)
         dist = np.sqrt((gaze_point[0] - last_fixation_point[0])**2 + 
                       (gaze_point[1] - last_fixation_point[1])**2)
         
@@ -403,10 +519,21 @@ def update_fixations(gaze_point):
             fixation_duration = 0
 
 def start_browser_tracking(url=BROWSER_URL):
-    """Start browser with Selenium for gaze tracking on a webpage"""
+    """
+    Start browser with Selenium for gaze tracking on a webpage.
+    
+    Initializes and configures a Chrome browser window, handles cookie consent,
+    captures the full webpage, and sets up tracking threads.
+    
+    Args:
+        url: The webpage URL to track (defaults to BROWSER_URL)
+        
+    Returns:
+        The browser instance
+    """
     global browser, browser_position, browser_size, USE_BROWSER
     global webpage_height, webpage_width, scroll_position, web_gaze_points
-    global full_webpage_image  # Store the full webpage image
+    global full_webpage_image
     
     # Reset gaze points when starting a new browser session
     web_gaze_points = []
@@ -544,7 +671,12 @@ def start_browser_tracking(url=BROWSER_URL):
     return browser
 
 def add_disclaimer_overlay():
-    """Add a disclaimer overlay to the browser window"""
+    """
+    Add a disclaimer overlay to the browser window.
+    
+    Creates a fixed overlay with text explaining that eye tracking is in progress.
+    Uses JavaScript to inject the overlay into the webpage DOM.
+    """
     global browser
     
     if browser is None:
@@ -594,7 +726,12 @@ def add_disclaimer_overlay():
         print(f"Error adding disclaimer overlay: {e}")
 
 def update_disclaimer_for_scrolling():
-    """Update the disclaimer to show scrolling status"""
+    """
+    Update the disclaimer to show scrolling status.
+    
+    Changes the overlay content to inform the user that the browser
+    is automatically scrolling to capture the webpage.
+    """
     global browser
     
     if browser is None:
@@ -623,7 +760,12 @@ def update_disclaimer_for_scrolling():
         print(f"Error updating disclaimer: {e}")
 
 def update_disclaimer_after_scrolling():
-    """Update the disclaimer after scrolling to allow closing"""
+    """
+    Update the disclaimer after scrolling to allow closing.
+    
+    Changes the overlay content to inform the user that tracking is active
+    and adds a button to close the overlay.
+    """
     global browser
     
     if browser is None:
@@ -654,7 +796,11 @@ def update_disclaimer_after_scrolling():
         print(f"Error updating disclaimer after scrolling: {e}")
 
 def remove_disclaimer_overlay():
-    """Remove the disclaimer overlay from the browser window"""
+    """
+    Remove the disclaimer overlay from the browser window.
+    
+    Completely removes the overlay element from the DOM.
+    """
     global browser
     
     if browser is None:
@@ -672,7 +818,12 @@ def remove_disclaimer_overlay():
         print(f"Error removing disclaimer overlay: {e}")
 
 def monitor_scroll_position():
-    """Monitor scroll position in browser"""
+    """
+    Monitor scroll position in browser.
+    
+    Runs in a background thread to continuously track the scroll position
+    of the webpage for accurate gaze mapping.
+    """
     global scroll_position, browser
     
     while browser is not None:
@@ -683,7 +834,12 @@ def monitor_scroll_position():
             break
 
 def overlay_heatmap_on_browser():
-    """Overlays a semi-transparent heatmap on the browser in real-time"""
+    """
+    Overlays a semi-transparent heatmap on the browser in real-time.
+    
+    Creates and updates a visual heatmap overlay in the browser window
+    showing where the user has been looking.
+    """
     global browser, web_gaze_points, webpage_height, webpage_width
     
     # Wait a bit for the browser to be fully initialized
@@ -789,7 +945,18 @@ def overlay_heatmap_on_browser():
             time.sleep(0.5)
 
 def map_gaze_to_webpage(gaze_point):
-    """Map gaze point on screen to position on webpage"""
+    """
+    Map gaze point on screen to position on webpage.
+    
+    Converts screen coordinates to webpage coordinates, accounting for
+    browser position, window decorations, and scroll position.
+    
+    Args:
+        gaze_point: (x, y) screen coordinates of gaze point
+        
+    Returns:
+        (x, y) coordinates relative to the webpage, or None if outside browser
+    """
     global browser_position, browser_size, scroll_position
     
     if gaze_point is None or browser is None or scroll_position is None:
@@ -803,8 +970,9 @@ def map_gaze_to_webpage(gaze_point):
     # Adjust for window decoration (approximately)
     browser_header_height = 80
     
-    # X-axis correction factor to fix leftward shift
-    x_correction = 1000 # Pixels to shift right 
+    # X-axis correction factor to fix leftward shift which
+    #is an issue we are facing with the browser
+    x_correction = 40 # Pixels to shift right 
     
     # Check if gaze is in browser content area
     if (browser_x <= x <= browser_x + browser_w and 
@@ -819,7 +987,15 @@ def map_gaze_to_webpage(gaze_point):
     return None
 
 def capture_full_webpage():
-    """Capture full webpage screenshot"""
+    """
+    Capture full webpage screenshot.
+    
+    Scrolls through the entire webpage to capture a complete screenshot
+    by taking multiple screenshots and combining them.
+    
+    Returns:
+        PIL Image of the full webpage, or None if capture fails
+    """
     global browser, webpage_height, webpage_width
     
     if browser is None:
@@ -945,7 +1121,15 @@ def capture_full_webpage():
         return None
 
 def generate_webpage_heatmap():
-    """Generate heatmap overlay for the full webpage"""
+    """
+    Generate heatmap overlay for the full webpage.
+    
+    Creates a heatmap visualization based on collected gaze data
+    that matches the dimensions of the captured webpage.
+    
+    Returns:
+        OpenCV image with the colored heatmap, or None if generation fails
+    """
     global web_gaze_points, webpage_height, webpage_width, full_webpage_image
     
     if not web_gaze_points:
@@ -969,6 +1153,8 @@ def generate_webpage_heatmap():
         # Make sure coordinates are within bounds
         if 0 <= x < img_width and 0 <= y < img_height:
             # Create a gaussian blob around the gaze point
+            # This is pretty much we did before but statically
+            # using all the gaze points we captured
             sigma = 50  # Size of gaussian blob
             y_pos = min(max(0, int(y)), img_height-1)
             x_pos = min(max(0, int(x)), img_width-1)
@@ -1018,7 +1204,14 @@ def generate_webpage_heatmap():
     return heatmap_colored
 
 def save_webpage_heatmap():
-    """Save full webpage with heatmap overlay"""
+    """
+    Save full webpage with heatmap overlay.
+    
+    Generates and saves:
+    1. The original webpage image
+    2. A heatmap overlay showing gaze distribution
+    3. The raw gaze data in CSV format
+    """
     global full_webpage_image, web_gaze_points
     
     if full_webpage_image is None:
@@ -1088,6 +1281,12 @@ def save_webpage_heatmap():
         import traceback
         traceback.print_exc()
 
+
+"""
+Main function for eye tracking application.
+Handles calibration process, browser integration, and real-time eye tracking.
+Processes user input for controlling the application features.
+"""
 # Main loop
 try:
     print("Starting eye tracking with automatic browser launch")
@@ -1183,9 +1382,9 @@ try:
             
             # Display instructions
             cv2.putText(display_frame, "Look at the red circle and press SPACE to calibrate", 
-                       (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             cv2.putText(display_frame, f"Points: {len(calibration_points)}/{CALIBRATION_POINTS}", 
-                       (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         else:
             # If calibration complete, map gaze to screen
             if calibrated and left_pupil is not None and right_pupil is not None:
@@ -1221,12 +1420,12 @@ try:
                         web_point = map_gaze_to_webpage(smooth_gaze_point)
                         if web_point is not None:
                             cv2.putText(display_frame, f"Web: {int(web_point[0])}, {int(web_point[1])}", 
-                                      (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                                    (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                         
                         # Fix: Check if scroll_position is None before converting to int
                         if scroll_position is not None:
                             cv2.putText(display_frame, f"Scroll: {int(scroll_position)}", 
-                                      (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                                    (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         # Overlay heatmap if enabled and available
         if DISPLAY_HEATMAP and heatmap_updated and calibrated:
@@ -1242,12 +1441,12 @@ try:
         # Display calibration status
         if calibrated:
             cv2.putText(display_frame, "Calibrated - Press 'r' to recalibrate", 
-                       (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
             # Show fixation info if available
             if last_fixation_point is not None and fixation_duration > 200:
                 cv2.putText(display_frame, f"Fixation: {int(fixation_duration)}ms", 
-                           (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         # Show the frame
         cv2.imshow('Gaze Tracker', display_frame)

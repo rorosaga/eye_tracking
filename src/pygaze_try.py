@@ -174,7 +174,7 @@ def detect_pupil(eye_frame):
     if eye_frame is None or eye_frame.size == 0:
         return None, None
     
-    # Convert to grayscale if necessary
+    # Convert to grayscale if not already
     if len(eye_frame.shape) == 3:
         eye_gray = cv2.cvtColor(eye_frame, cv2.COLOR_BGR2GRAY)
     else:
@@ -183,7 +183,7 @@ def detect_pupil(eye_frame):
     # Enhance contrast
     eye_gray = cv2.equalizeHist(eye_gray)
     
-    # Apply Gaussian blur
+    # Gaussian blur
     blur = cv2.GaussianBlur(eye_gray, (5, 5), 0)
     
     # Find the darkest region as a simple pupil detector
@@ -244,7 +244,6 @@ def smooth_gaze(current_gaze, history):
     total_y = 0
     total_weight = 0
     
-    # Higher weights for more recent positions - fixed to avoid index error
     # Create weights dynamically based on history length
     weights = [2**i for i in range(len(history))]  # Exponential weighting
     
@@ -293,7 +292,6 @@ def map_eye_to_screen(left_pupil, right_pupil):
         screen_x = int(norm_x * frame_width)
         screen_y = int(norm_y * frame_height)
         
-        # Update last gaze time
         last_gaze_update = time.time()
         
         return (screen_x, screen_y)
@@ -307,7 +305,7 @@ def update_heatmap(gaze_point):
     if gaze_point is None:
         return
     
-    # Create a temporary heatmap for the new point
+    # temporary heatmap for the new point
     temp_heatmap = np.zeros_like(heatmap)
     
     # Draw a gaussian at the gaze point
@@ -316,10 +314,10 @@ def update_heatmap(gaze_point):
     
     # Ensure in bounds
     if 0 <= x < frame_width and 0 <= y < frame_height:
-        # Add a circular blob
+        # circular blob
         cv2.circle(temp_heatmap, (x, y), sigma, 1.0, -1)
         
-        # Apply gaussian blur
+        # gaussian blur
         temp_heatmap = cv2.GaussianBlur(temp_heatmap, (sigma*2+1, sigma*2+1), sigma/3)
         
         # Normalize
@@ -329,7 +327,7 @@ def update_heatmap(gaze_point):
         # Apply decay to existing heatmap and add new points
         heatmap = heatmap * HEATMAP_DECAY + temp_heatmap * HEATMAP_INTENSITY
         
-        # Clamp values
+        # clamp values
         heatmap = np.clip(heatmap, 0, 1)
         
         # Update the colormap
@@ -424,13 +422,9 @@ def start_browser_tracking(url=BROWSER_URL):
     chrome_options.add_argument("--disable-infobars")
     chrome_options.add_argument("--disable-extensions")
     
-    # Initialize browser
+    # Initialize browser and scroll position
     browser = webdriver.Chrome(options=chrome_options)
-    
-    # Initialize scroll position
     scroll_position = 0
-    
-    # Navigate to URL
     browser.get(url)
     
     # Add disclaimer overlay immediately
@@ -456,7 +450,6 @@ def start_browser_tracking(url=BROWSER_URL):
         except Exception as e:
             print(f"Specific button not found: {e}, trying alternative methods")
             
-            # If specific button fails, try text content
             try:
                 cookie_button = WebDriverWait(browser, 3).until(
                     EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Aceptar seguimiento')]"))
@@ -468,7 +461,6 @@ def start_browser_tracking(url=BROWSER_URL):
                     print("Clicked cookie button by text")
                     time.sleep(2)
             except:
-                # Fall back to previous methods
                 cookie_patterns = [
                     "//button[contains(text(), 'Accept')]",
                     "//button[contains(text(), 'Aceptar')]",
@@ -515,7 +507,6 @@ def start_browser_tracking(url=BROWSER_URL):
     print(f"Browser started at position {browser_position}, size {browser_size}")
     print(f"Webpage dimensions: {webpage_width}x{webpage_height}")
     
-    # Update the disclaimer to inform user about the scrolling process
     update_disclaimer_for_scrolling()
     
     # Capture the full webpage at the beginning
@@ -551,7 +542,6 @@ def start_browser_tracking(url=BROWSER_URL):
     # Start monitoring scroll position in a background thread
     threading.Thread(target=monitor_scroll_position, daemon=True).start()
     
-    # Update the disclaimer to allow the user to close it
     update_disclaimer_after_scrolling()
     
     return browser
@@ -693,7 +683,6 @@ def monitor_scroll_position():
             scroll_position = browser.execute_script("return window.pageYOffset")
             time.sleep(0.1)  # Check 10 times per second
         except:
-            # Browser probably closed
             break
 
 def overlay_heatmap_on_browser():
@@ -705,7 +694,7 @@ def overlay_heatmap_on_browser():
     
     # Track when we last updated the heatmap
     last_update_time = 0
-    update_interval = 0.3  # Update every 300ms for better performance
+    update_interval = 0.3  # Update every 300ms
     
     # Store a reference to the base64 heatmap to avoid unnecessary updates
     last_heatmap_data = None
@@ -759,7 +748,6 @@ def overlay_heatmap_on_browser():
                 
                 # Only update if the heatmap has changed
                 if heatmap_b64 != last_heatmap_data:
-                    # Inject overlay div if it doesn't exist yet, or update it
                     browser.execute_script("""
                         var heatmapOverlay = document.getElementById('gaze_heatmap_overlay');
                         if (!heatmapOverlay) {
@@ -793,7 +781,6 @@ def overlay_heatmap_on_browser():
                     # Store for comparison
                     last_heatmap_data = heatmap_b64
                     
-                # Update timestamp
                 last_update_time = current_time
             
             # Sleep a short time to avoid high CPU usage
@@ -817,10 +804,10 @@ def map_gaze_to_webpage(gaze_point):
     browser_w, browser_h = browser_size
     
     # Adjust for window decoration (approximately)
-    browser_header_height = 80  # Approximate height of browser header
+    browser_header_height = 80
     
-    # X-axis correction factor to fix leftward shift (adjust as needed)
-    x_correction = 25  # Pixels to shift right - adjust this value based on testing
+    # X-axis correction factor to fix leftward shift
+    x_correction = 40 # Pixels to shift right 
     
     # Check if gaze is in browser content area
     if (browser_x <= x <= browser_x + browser_w and 
